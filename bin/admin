@@ -1,0 +1,8 @@
+#!/usr/bin/env sh
+set -eu
+
+if docker compose ps api >/dev/null 2>&1; then
+  docker compose exec api /app/psn-add-admin
+else
+  go run ./cmd/admin
+fi

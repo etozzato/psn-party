@@ -1,0 +1,49 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: psn-add-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: psn_add
+      POSTGRES_USER: psn_add
+      POSTGRES_PASSWORD: psn_add
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U psn_add -d psn_add"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        VERSION: compose
+    container_name: psn-add-api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NAME: PSN Add
+      APP_ENV: development
+      PUBLIC_BASE_URL: http://localhost:8890
+      PORT: 8890
+      BIND_ADDRESS: 0.0.0.0
+      LOG_LEVEL: info
+      CORS_ALLOW_ORIGIN: "*"
+      DATABASE_URL: postgresql://psn_add:psn_add@postgres:5432/psn_add?sslmode=disable
+      DB_MAX_CONNS: 15
+      DB_MIN_CONNS: 2
+      DB_MAX_CONN_IDLE_SECONDS: 120
+      DB_MAX_CONN_LIFETIME_SECONDS: 1800
+      PROFILE_TIMEOUT_SECONDS: 4
+    ports:
+      - "8890:8890"
+
+volumes:
+  postgres_data:

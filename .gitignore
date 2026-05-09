@@ -1,0 +1,25 @@
+# Local configuration and secrets.
+.env
+config/.env
+*.env.local
+
+# Build outputs.
+server
+psn-add-api
+psn-add-admin
+dist/
+build/
+tmp/
+
+# Local tooling.
+.venv/
+.DS_Store
+
+# Logs and runtime files.
+*.log
+*.pid
+
+# Optional local database/data dumps.
+postgres_data/
+*.sql.gz
+*.dump
