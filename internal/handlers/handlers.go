@@ -2,9 +2,11 @@ package handlers
 
 import (
 	"encoding/csv"
-	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"regexp"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -23,6 +25,7 @@ type Handler struct {
 
 type newPageData struct {
 	Error string
+	Stats groups.Stats
 }
 
 type createdPageData struct {
@@ -30,6 +33,7 @@ type createdPageData struct {
 	GroupURL   string
 	AdminURL   string
 	AdminToken string
+	PIN        string
 }
 
 type groupPageData struct {
@@ -38,14 +42,24 @@ type groupPageData struct {
 	Sort          string
 	AdminToken    string
 	CanGroupAdmin bool
+	PIN           string
 	Error         string
+	FormName      string
+	FormOnlineID  string
 	Created       *groups.AddEntryResult
+}
+
+type pinPageData struct {
+	Group    groups.Group
+	Redirect string
+	Error    string
 }
 
 type uploadPageData struct {
 	Group      groups.Group
 	AdminToken string
 	Error      string
+	CSVText    string
 	Result     *groups.BatchAddResult
 }
 
@@ -74,10 +88,14 @@ func (h *Handler) Register(r *gin.Engine) {
 	r.GET("/", func(c *gin.Context) { c.Redirect(http.StatusSeeOther, "/new") })
 	r.GET("/new", h.newGroupPage)
 	r.POST("/new", h.createGroup)
+	r.POST("/g/:slug/unlock", h.unlockGroup)
 	r.GET("/g/:slug", h.groupPage)
 	r.POST("/g/:slug/entries", h.addEntry)
 	r.GET("/g/:slug/upload", h.uploadPage)
 	r.POST("/g/:slug/upload", h.uploadEntries)
+	r.GET("/g/:slug/export.csv", h.exportEntries)
+	r.POST("/g/:slug/pin/remove", h.removeGroupPIN)
+	r.POST("/g/:slug/pin/update", h.updateGroupPIN)
 	r.GET("/g/:slug/:online_id", h.entryPage)
 	r.POST("/g/:slug/:online_id/pull", h.pullEntry)
 	r.POST("/g/:slug/:online_id/remove", h.removeEntry)
@@ -85,35 +103,44 @@ func (h *Handler) Register(r *gin.Engine) {
 }
 
 func (h *Handler) newGroupPage(c *gin.Context) {
-	web.Render(c, http.StatusOK, "PSN Add / New", "new", newPageData{})
+	stats, err := h.groups.Stats(c.Request.Context())
+	if err != nil {
+		h.renderError(c, err, "/new")
+		return
+	}
+	web.Render(c, http.StatusOK, "PSN Add / New", "new", newPageData{Stats: stats})
 }
 
 func (h *Handler) createGroup(c *gin.Context) {
-	result, err := h.groups.CreateGroup(c.Request.Context(), h.cfg.PublicBaseURL, c.PostForm("name"))
+	result, err := h.groups.CreateGroup(c.Request.Context(), h.cfg.PublicBaseURL, c.PostForm("name"), c.PostForm("visibility") == "private")
 	if err != nil {
 		if utils.WantsJSON(c) {
 			utils.WriteError(c, err)
 			return
 		}
-		web.Render(c, utils.AsAppError(err).Status, "PSN Add / New", "new", newPageData{Error: utils.AsAppError(err).Message})
+		stats, statsErr := h.groups.Stats(c.Request.Context())
+		if statsErr != nil {
+			h.renderError(c, statsErr, "/new")
+			return
+		}
+		web.Render(c, utils.AsAppError(err).Status, "PSN Add / New", "new", newPageData{Error: utils.AsAppError(err).Message, Stats: stats})
 		return
 	}
 	if utils.WantsJSON(c) {
 		utils.WriteData(c, http.StatusCreated, result)
 		return
 	}
+	h.setAdminCookie(c, result.Group, result.AdminToken)
 	web.Render(c, http.StatusCreated, "PSN Add / Created", "created", createdPageData(result))
 }
 
 func (h *Handler) groupPage(c *gin.Context) {
-	group, entries, sortBy, adminToken, err := h.loadGroupEntries(c)
+	group, entries, sortBy, adminToken, canGroupAdmin, err := h.loadGroupEntries(c)
 	if err != nil {
 		h.renderError(c, err, "/new")
 		return
 	}
-	canGroupAdmin, err := h.groups.GroupAdmin(c.Request.Context(), group.ID, adminToken)
-	if err != nil {
-		h.renderError(c, err, "/g/"+group.Slug)
+	if !canGroupAdmin && !h.ensureGroupAccess(c, group, "") {
 		return
 	}
 	web.Render(c, http.StatusOK, group.Name, "group", groupPageData{
@@ -131,8 +158,22 @@ func (h *Handler) addEntry(c *gin.Context) {
 		h.renderError(c, err, "/new")
 		return
 	}
+	adminToken := h.adminTokenForGroup(c, group)
+	canGroupAdmin, err := h.groups.GroupAdmin(c.Request.Context(), group.ID, adminToken)
+	if err != nil {
+		h.renderError(c, err, "/g/"+group.Slug)
+		return
+	}
+	if canGroupAdmin {
+		h.setAdminCookie(c, group, adminToken)
+	}
+	if !canGroupAdmin && !h.ensureGroupAccess(c, group, "") {
+		return
+	}
 
-	result, err := h.groups.AddEntryWithName(c.Request.Context(), h.cfg.PublicBaseURL, group, c.PostForm("display_name"), c.PostForm("online_id"))
+	displayName := strings.TrimSpace(c.PostForm("display_name"))
+	onlineID := strings.TrimSpace(c.PostForm("online_id"))
+	result, err := h.groups.AddEntryWithName(c.Request.Context(), h.cfg.PublicBaseURL, group, displayName, onlineID)
 	if err != nil {
 		entries, listErr := h.groups.ListEntries(c.Request.Context(), group.ID, sortFromRequest(c))
 		if listErr != nil {
@@ -140,11 +181,14 @@ func (h *Handler) addEntry(c *gin.Context) {
 			return
 		}
 		web.Render(c, utils.AsAppError(err).Status, group.Name, "group", groupPageData{
-			Group:      group,
-			Entries:    entries,
-			Sort:       sortFromRequest(c),
-			AdminToken: formOrQuery(c, "admin"),
-			Error:      utils.AsAppError(err).Message,
+			Group:         group,
+			Entries:       entries,
+			Sort:          sortFromRequest(c),
+			AdminToken:    adminToken,
+			CanGroupAdmin: canGroupAdmin,
+			Error:         utils.AsAppError(err).Message,
+			FormName:      displayName,
+			FormOnlineID:  onlineID,
 		})
 		return
 	}
@@ -154,14 +198,38 @@ func (h *Handler) addEntry(c *gin.Context) {
 		h.renderError(c, err, "/g/"+group.Slug)
 		return
 	}
-	adminToken := formOrQuery(c, "admin")
 	web.Render(c, http.StatusCreated, group.Name, "group", groupPageData{
-		Group:      group,
-		Entries:    entries,
-		Sort:       sortFromRequest(c),
-		AdminToken: adminToken,
-		Created:    &result,
+		Group:         group,
+		Entries:       entries,
+		Sort:          sortFromRequest(c),
+		AdminToken:    adminToken,
+		CanGroupAdmin: canGroupAdmin,
+		Created:       &result,
 	})
+}
+
+func (h *Handler) unlockGroup(c *gin.Context) {
+	group, err := h.groups.GetGroup(c.Request.Context(), c.Param("slug"))
+	if err != nil {
+		h.renderError(c, err, "/new")
+		return
+	}
+	redirect := cleanGroupRedirect(c.PostForm("redirect"), group.Slug)
+	ok, err := h.groups.VerifyPIN(c.Request.Context(), group.ID, c.PostForm("pin"))
+	if err != nil {
+		h.renderError(c, err, "/g/"+group.Slug)
+		return
+	}
+	if !ok {
+		web.Render(c, http.StatusForbidden, group.Name+" / PIN", "pin", pinPageData{
+			Group:    group,
+			Redirect: redirect,
+			Error:    "PIN did not match",
+		})
+		return
+	}
+	h.setPINCookie(c, group, c.PostForm("pin"))
+	c.Redirect(http.StatusSeeOther, redirect)
 }
 
 func (h *Handler) uploadPage(c *gin.Context) {
@@ -189,6 +257,7 @@ func (h *Handler) uploadEntries(c *gin.Context) {
 			Group:      group,
 			AdminToken: adminToken,
 			Error:      utils.AsAppError(err).Message,
+			CSVText:    uploadCSVText(c),
 		})
 		return
 	}
@@ -201,13 +270,85 @@ func (h *Handler) uploadEntries(c *gin.Context) {
 	})
 }
 
+func (h *Handler) exportEntries(c *gin.Context) {
+	group, _, err := h.requireGroupAdmin(c)
+	if err != nil {
+		h.renderError(c, err, "/g/"+c.Param("slug"))
+		return
+	}
+	entries, err := h.groups.ListEntries(c.Request.Context(), group.ID, groups.SortAZ)
+	if err != nil {
+		h.renderError(c, err, "/g/"+group.Slug)
+		return
+	}
+
+	filename := slugFileName(group.Name) + ".csv"
+	c.Header("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
+	c.Header("Content-Type", "text/csv; charset=utf-8")
+	writer := csv.NewWriter(c.Writer)
+	_ = writer.Write([]string{"Name (optional)", "PSN-ID"})
+	for _, entry := range entries {
+		_ = writer.Write([]string{entry.DisplayName, entry.OnlineID})
+	}
+	writer.Flush()
+	if err := writer.Error(); err != nil {
+		h.renderError(c, utils.Internal("could not export CSV", err), "/g/"+group.Slug)
+		return
+	}
+}
+
 func (h *Handler) entryPage(c *gin.Context) {
 	data, err := h.loadEntryPage(c)
 	if err != nil {
 		h.renderError(c, err, "/new")
 		return
 	}
+	if !data.CanAdmin && !h.ensureGroupAccess(c, data.Group, c.Request.URL.RequestURI()) {
+		return
+	}
 	web.Render(c, http.StatusOK, data.Entry.OnlineID, "entry", data)
+}
+
+func (h *Handler) removeGroupPIN(c *gin.Context) {
+	group, adminToken, err := h.requireGroupAdmin(c)
+	if err != nil {
+		h.renderError(c, err, "/g/"+c.Param("slug"))
+		return
+	}
+	if _, err := h.groups.ClearPIN(c.Request.Context(), group.ID); err != nil {
+		h.renderError(c, err, "/g/"+group.Slug+"?admin="+adminToken)
+		return
+	}
+	c.SetCookie(pinCookieName(group), "", -1, "/", "", false, true)
+	c.Redirect(http.StatusSeeOther, "/g/"+group.Slug+"?admin="+adminToken)
+}
+
+func (h *Handler) updateGroupPIN(c *gin.Context) {
+	group, adminToken, err := h.requireGroupAdmin(c)
+	if err != nil {
+		h.renderError(c, err, "/g/"+c.Param("slug"))
+		return
+	}
+	updated, pin, err := h.groups.RotatePIN(c.Request.Context(), group.ID)
+	if err != nil {
+		h.renderError(c, err, "/g/"+group.Slug+"?admin="+adminToken)
+		return
+	}
+	h.setPINCookie(c, updated, pin)
+
+	entries, err := h.groups.ListEntries(c.Request.Context(), updated.ID, sortFromRequest(c))
+	if err != nil {
+		h.renderError(c, err, "/g/"+updated.Slug+"?admin="+adminToken)
+		return
+	}
+	web.Render(c, http.StatusOK, updated.Name, "group", groupPageData{
+		Group:         updated,
+		Entries:       entries,
+		Sort:          sortFromRequest(c),
+		AdminToken:    adminToken,
+		CanGroupAdmin: true,
+		PIN:           pin,
+	})
 }
 
 func (h *Handler) pullEntry(c *gin.Context) {
@@ -276,17 +417,25 @@ func (h *Handler) qr(c *gin.Context) {
 	c.Data(http.StatusOK, "image/png", png)
 }
 
-func (h *Handler) loadGroupEntries(c *gin.Context) (groups.Group, []groups.Entry, string, string, error) {
+func (h *Handler) loadGroupEntries(c *gin.Context) (groups.Group, []groups.Entry, string, string, bool, error) {
 	group, err := h.groups.GetGroup(c.Request.Context(), c.Param("slug"))
 	if err != nil {
-		return groups.Group{}, nil, "", "", err
+		return groups.Group{}, nil, "", "", false, err
+	}
+	adminToken := h.adminTokenForGroup(c, group)
+	canGroupAdmin, err := h.groups.GroupAdmin(c.Request.Context(), group.ID, adminToken)
+	if err != nil {
+		return groups.Group{}, nil, "", "", false, err
+	}
+	if canGroupAdmin {
+		h.setAdminCookie(c, group, adminToken)
 	}
 	sortBy := sortFromRequest(c)
 	entries, err := h.groups.ListEntries(c.Request.Context(), group.ID, sortBy)
 	if err != nil {
-		return groups.Group{}, nil, "", "", err
+		return groups.Group{}, nil, "", "", false, err
 	}
-	return group, entries, sortBy, formOrQuery(c, "admin"), nil
+	return group, entries, sortBy, adminToken, canGroupAdmin, nil
 }
 
 func (h *Handler) loadEntryPage(c *gin.Context) (entryPageData, error) {
@@ -299,10 +448,13 @@ func (h *Handler) loadEntryPage(c *gin.Context) (entryPageData, error) {
 		return entryPageData{}, err
 	}
 
-	adminToken := formOrQuery(c, "admin")
+	adminToken := h.adminTokenForGroup(c, group)
 	groupAdmin, err := h.groups.GroupAdmin(c.Request.Context(), group.ID, adminToken)
 	if err != nil {
 		return entryPageData{}, err
+	}
+	if groupAdmin {
+		h.setAdminCookie(c, group, adminToken)
 	}
 	entryAdmin, err := h.groups.EntryAdmin(c.Request.Context(), entry.ID, adminToken)
 	if err != nil {
@@ -322,7 +474,7 @@ func (h *Handler) requireGroupAdmin(c *gin.Context) (groups.Group, string, error
 	if err != nil {
 		return groups.Group{}, "", err
 	}
-	adminToken := formOrQuery(c, "admin")
+	adminToken := h.adminTokenForGroup(c, group)
 	ok, err := h.groups.GroupAdmin(c.Request.Context(), group.ID, adminToken)
 	if err != nil {
 		return groups.Group{}, "", err
@@ -330,7 +482,88 @@ func (h *Handler) requireGroupAdmin(c *gin.Context) (groups.Group, string, error
 	if !ok {
 		return groups.Group{}, "", utils.Forbidden("group admin token required")
 	}
+	h.setAdminCookie(c, group, adminToken)
 	return group, adminToken, nil
+}
+
+func (h *Handler) ensureGroupAccess(c *gin.Context, group groups.Group, redirect string) bool {
+	if !group.HasPIN {
+		return true
+	}
+	if h.hasPINAccess(c, group) {
+		return true
+	}
+	if redirect == "" {
+		redirect = "/g/" + group.Slug
+	}
+	web.Render(c, http.StatusForbidden, group.Name+" / PIN", "pin", pinPageData{
+		Group:    group,
+		Redirect: redirect,
+	})
+	return false
+}
+
+func (h *Handler) hasPINAccess(c *gin.Context, group groups.Group) bool {
+	pin := strings.TrimSpace(c.Query("pin"))
+	if pin != "" {
+		ok, err := h.groups.VerifyPIN(c.Request.Context(), group.ID, pin)
+		if err == nil && ok {
+			h.setPINCookie(c, group, pin)
+			return true
+		}
+	}
+	cookie, err := c.Cookie(pinCookieName(group))
+	if err != nil {
+		return false
+	}
+	ok, err := h.groups.VerifyPINHash(c.Request.Context(), group.ID, cookie)
+	return err == nil && ok
+}
+
+func (h *Handler) setPINCookie(c *gin.Context, group groups.Group, pin string) {
+	c.SetCookie(pinCookieName(group), utils.HashToken(pin), 60*60*24*30, "/", "", false, true)
+}
+
+func pinCookieName(group groups.Group) string {
+	return "psn_add_pin_" + group.Slug[:16]
+}
+
+func (h *Handler) adminTokenForGroup(c *gin.Context, group groups.Group) string {
+	token := formOrQuery(c, "admin")
+	if token != "" {
+		return token
+	}
+	cookie, err := c.Cookie(adminCookieName(group))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(cookie)
+}
+
+func (h *Handler) setAdminCookie(c *gin.Context, group groups.Group, token string) {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return
+	}
+	c.SetCookie(adminCookieName(group), token, 60*60*24*30, "/", "", false, true)
+}
+
+func adminCookieName(group groups.Group) string {
+	return "psn_add_admin_" + group.Slug[:16]
+}
+
+func cleanGroupRedirect(raw, slug string) string {
+	if strings.TrimSpace(raw) == "" {
+		return "/g/" + slug
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.IsAbs() || !strings.HasPrefix(parsed.Path, "/g/"+slug) {
+		return "/g/" + slug
+	}
+	if parsed.RawQuery != "" {
+		return parsed.Path + "?" + parsed.RawQuery
+	}
+	return parsed.Path
 }
 
 func parseUploadRows(c *gin.Context) ([]groups.BatchAddRow, error) {
@@ -374,23 +607,15 @@ func parseUploadRows(c *gin.Context) ([]groups.BatchAddRow, error) {
 }
 
 func uploadReader(c *gin.Context) (io.ReadCloser, error) {
-	fileHeader, err := c.FormFile("csv")
-	if err == nil {
-		file, err := fileHeader.Open()
-		if err != nil {
-			return nil, utils.BadRequest("CSV file could not be opened")
-		}
-		return file, nil
-	}
-	if !errors.Is(err, http.ErrMissingFile) {
-		return nil, utils.BadRequest("CSV upload could not be read")
-	}
-
-	text := strings.TrimSpace(c.PostForm("csv_text"))
+	text := uploadCSVText(c)
 	if text == "" {
 		return nil, utils.BadRequest("CSV file or pasted CSV is required")
 	}
 	return io.NopCloser(strings.NewReader(text)), nil
+}
+
+func uploadCSVText(c *gin.Context) string {
+	return strings.TrimSpace(c.PostForm("csv_text"))
 }
 
 func blankRecord(record []string) bool {
@@ -431,9 +656,21 @@ func sortFromRequest(c *gin.Context) string {
 }
 
 func formOrQuery(c *gin.Context, key string) string {
-	value := strings.TrimSpace(c.PostForm(key))
+	value := strings.TrimSpace(c.Query(key))
 	if value != "" {
 		return value
 	}
-	return strings.TrimSpace(c.Query(key))
+	return strings.TrimSpace(c.PostForm(key))
+}
+
+var fileUnsafePattern = regexp.MustCompile(`[^a-z0-9_-]+`)
+
+func slugFileName(value string) string {
+	name := strings.ToLower(strings.TrimSpace(value))
+	name = fileUnsafePattern.ReplaceAllString(name, "-")
+	name = strings.Trim(name, "-")
+	if name == "" {
+		return "party"
+	}
+	return name
 }

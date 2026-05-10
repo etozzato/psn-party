@@ -260,6 +260,8 @@ Prawn::Document.generate("playstation_profiles.pdf") do
   font "Nerd"
 
   user_pairs.each do |name, username|
+    puts "#{name.strip},#{username.strip}"
+
     online_id = username.strip
     profile_url = "https://profile.playstation.com/#{CGI.escape(online_id)}"
     profile_html = profile_cache[online_id] ||= fetch_profile_page(profile_url)

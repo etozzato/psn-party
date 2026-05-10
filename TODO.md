@@ -47,3 +47,12 @@ POST to /app-url/SHA/psn-id/remove and /ban need to deal with some sort "AM I AD
  # UPDATE 2
 
  we mentioned email - do we have a way to send an email? if not, let's ditch that idea and add a "EMAIL YOURSELF" button: wherever the private key is shown, after any creation the EMAIL YOURSELF button opens their own configured email client with subject: XXX and Body: YYY (you know how to fill in the blanks)
+
+# UPDATE 3
+
+when creating a group, two buttons: PRIVATE / PUBLIC; private will generate a 5 digit pin.
+admin can remove the pin (PUBLIC) or update the pin.
+
+# UPDATE 4
+
+Tallies: homepage shows the number of parties (groups) and entries (total psn ids); party page shows count of its entries

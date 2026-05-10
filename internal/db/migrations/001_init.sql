@@ -3,6 +3,7 @@ CREATE TABLE IF NOT EXISTS groups (
     name TEXT NOT NULL,
     slug TEXT NOT NULL UNIQUE,
     admin_token_hash TEXT NOT NULL,
+    pin_hash TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     deleted_at TIMESTAMPTZ

@@ -8,6 +8,7 @@ Ultra-minimal PSN friend-list helper. A user creates a group, shares the group U
 - `GET /g/:slug` shows the group list with `A-Z`, `RECENT`, and `NEW` controls.
 - `POST /g/:slug/entries` adds an optional name plus PSN ID and returns an entry admin link on screen.
 - `GET|POST /g/:slug/upload` lets a group admin batch import `Name (optional),PSN-ID` CSV rows.
+- `GET /g/:slug/export.csv` lets a group admin download all active entries as `group-name.csv`.
 - `GET /g/:slug/:online_id` shows one QR card.
 - `POST /g/:slug/:online_id/pull` re-fetches PlayStation profile visibility.
 - `POST /g/:slug/:online_id/remove` removes an entry.
@@ -15,6 +16,10 @@ Ultra-minimal PSN friend-list helper. A user creates a group, shares the group U
 - `cmd/admin` is the emergency text admin for listing, showing, renaming, deleting groups, and banning IDs.
 
 Admin access is token based. Group admins can manage every entry in the group. Entry admins can manage only the entry they created. The service does not send email; creation screens include an `EMAIL YOURSELF` mailto button so users can back up admin links in their own configured email client.
+
+Groups can be `PUBLIC` or `PRIVATE` at creation. Private groups generate a 5-digit PIN that visitors must enter before viewing or adding entries. Group admins bypass the PIN and can make the group public, make it private again, or rotate the PIN from the group page.
+
+The homepage shows live tallies for parties and total PSN IDs. Each party page shows its own current PSN ID count in the sticky header.
 
 ## Local Run
 
@@ -36,7 +41,9 @@ Emanuele,psychic-disco2
 ,SomeHandle123
 ```
 
-`NAME` is optional, but the comma is required. Each imported row receives its own entry admin link and `EMAIL` action in the result list. Duplicate, blocked, or invalid PSN IDs are reported per row without stopping the rest of the import.
+`NAME` is optional, but the comma is required. Each imported row receives its own entry admin link and `EMAIL` action in the result list. Duplicate, blocked, or invalid PSN IDs are reported per row without stopping the rest of the import. The slow part is the PlayStation public/private check; the app shows a `CHECKING PSN` loader and runs batch checks with bounded concurrency.
+
+Group admins can also use `CSV` to download the active list as `group-name.csv` using the same two-column format.
 
 To use the text admin:
 

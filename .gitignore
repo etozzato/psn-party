@@ -23,3 +23,4 @@ tmp/
 postgres_data/
 *.sql.gz
 *.dump
+sandbox/list.csv

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -29,7 +30,13 @@ type Group struct {
 	ID        int64
 	Name      string
 	Slug      string
+	HasPIN    bool
 	CreatedAt time.Time
+}
+
+type Stats struct {
+	Groups  int64
+	Entries int64
 }
 
 type Entry struct {
@@ -52,6 +59,7 @@ type CreateGroupResult struct {
 	GroupURL   string
 	AdminURL   string
 	AdminToken string
+	PIN        string
 }
 
 type AddEntryResult struct {
@@ -81,7 +89,7 @@ func New(pool *pgxpool.Pool, psn *psnsvc.Service) *Service {
 	return &Service{pool: pool, psn: psn}
 }
 
-func (s *Service) CreateGroup(ctx context.Context, baseURL, name string) (CreateGroupResult, error) {
+func (s *Service) CreateGroup(ctx context.Context, baseURL, name string, private bool) (CreateGroupResult, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return CreateGroupResult{}, utils.BadRequest("group name is required")
@@ -98,16 +106,26 @@ func (s *Service) CreateGroup(ctx context.Context, baseURL, name string) (Create
 	if err != nil {
 		return CreateGroupResult{}, utils.Internal("could not generate admin link", err)
 	}
+	pin := ""
+	pinHash := ""
+	if private {
+		pin, err = utils.NewPIN()
+		if err != nil {
+			return CreateGroupResult{}, utils.Internal("could not generate group PIN", err)
+		}
+		pinHash = utils.HashToken(pin)
+	}
 
 	var group Group
 	err = s.pool.QueryRow(ctx, `
-		INSERT INTO groups (name, slug, admin_token_hash)
-		VALUES ($1, $2, $3)
-		RETURNING id, name, slug, created_at
-	`, name, slug, utils.HashToken(adminToken)).Scan(
+		INSERT INTO groups (name, slug, admin_token_hash, pin_hash)
+		VALUES ($1, $2, $3, NULLIF($4, ''))
+		RETURNING id, name, slug, pin_hash IS NOT NULL, created_at
+	`, name, slug, utils.HashToken(adminToken), pinHash).Scan(
 		&group.ID,
 		&group.Name,
 		&group.Slug,
+		&group.HasPIN,
 		&group.CreatedAt,
 	)
 	if err != nil {
@@ -123,21 +141,108 @@ func (s *Service) CreateGroup(ctx context.Context, baseURL, name string) (Create
 		GroupURL:   groupURL,
 		AdminURL:   groupURL + "?admin=" + adminToken,
 		AdminToken: adminToken,
+		PIN:        pin,
 	}, nil
 }
 
 func (s *Service) GetGroup(ctx context.Context, slug string) (Group, error) {
 	var group Group
 	err := s.pool.QueryRow(ctx, `
-		SELECT id, name, slug, created_at
+		SELECT id, name, slug, pin_hash IS NOT NULL, created_at
 		FROM groups
 		WHERE slug = $1 AND deleted_at IS NULL
-	`, strings.TrimSpace(slug)).Scan(&group.ID, &group.Name, &group.Slug, &group.CreatedAt)
+	`, strings.TrimSpace(slug)).Scan(&group.ID, &group.Name, &group.Slug, &group.HasPIN, &group.CreatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Group{}, utils.NotFound("group not found")
 		}
 		return Group{}, utils.Internal("could not load group", err)
+	}
+	return group, nil
+}
+
+func (s *Service) Stats(ctx context.Context) (Stats, error) {
+	var stats Stats
+	err := s.pool.QueryRow(ctx, `
+		SELECT
+			(SELECT COUNT(*) FROM groups WHERE deleted_at IS NULL),
+			(SELECT COUNT(*) FROM entries WHERE removed_at IS NULL AND banned_at IS NULL)
+	`).Scan(&stats.Groups, &stats.Entries)
+	if err != nil {
+		return Stats{}, utils.Internal("could not load tallies", err)
+	}
+	return stats, nil
+}
+
+func (s *Service) VerifyPIN(ctx context.Context, groupID int64, pin string) (bool, error) {
+	pin = strings.TrimSpace(pin)
+	if pin == "" {
+		return false, nil
+	}
+	var ok bool
+	if err := s.pool.QueryRow(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM groups
+			WHERE id = $1 AND pin_hash = $2 AND deleted_at IS NULL
+		)
+	`, groupID, utils.HashToken(pin)).Scan(&ok); err != nil {
+		return false, utils.Internal("could not verify group PIN", err)
+	}
+	return ok, nil
+}
+
+func (s *Service) VerifyPINHash(ctx context.Context, groupID int64, pinHash string) (bool, error) {
+	pinHash = strings.TrimSpace(pinHash)
+	if pinHash == "" {
+		return false, nil
+	}
+	var ok bool
+	if err := s.pool.QueryRow(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM groups
+			WHERE id = $1 AND pin_hash = $2 AND deleted_at IS NULL
+		)
+	`, groupID, pinHash).Scan(&ok); err != nil {
+		return false, utils.Internal("could not verify group PIN", err)
+	}
+	return ok, nil
+}
+
+func (s *Service) RotatePIN(ctx context.Context, groupID int64) (Group, string, error) {
+	pin, err := utils.NewPIN()
+	if err != nil {
+		return Group{}, "", utils.Internal("could not generate group PIN", err)
+	}
+
+	var group Group
+	err = s.pool.QueryRow(ctx, `
+		UPDATE groups
+		SET pin_hash = $2
+		WHERE id = $1 AND deleted_at IS NULL
+		RETURNING id, name, slug, pin_hash IS NOT NULL, created_at
+	`, groupID, utils.HashToken(pin)).Scan(&group.ID, &group.Name, &group.Slug, &group.HasPIN, &group.CreatedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Group{}, "", utils.NotFound("group not found")
+		}
+		return Group{}, "", utils.Internal("could not update group PIN", err)
+	}
+	return group, pin, nil
+}
+
+func (s *Service) ClearPIN(ctx context.Context, groupID int64) (Group, error) {
+	var group Group
+	err := s.pool.QueryRow(ctx, `
+		UPDATE groups
+		SET pin_hash = NULL
+		WHERE id = $1 AND deleted_at IS NULL
+		RETURNING id, name, slug, pin_hash IS NOT NULL, created_at
+	`, groupID).Scan(&group.ID, &group.Name, &group.Slug, &group.HasPIN, &group.CreatedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Group{}, utils.NotFound("group not found")
+		}
+		return Group{}, utils.Internal("could not remove group PIN", err)
 	}
 	return group, nil
 }
@@ -227,20 +332,44 @@ func (s *Service) AddEntryWithName(ctx context.Context, baseURL string, group Gr
 }
 
 func (s *Service) AddEntriesBatch(ctx context.Context, baseURL string, group Group, rows []BatchAddRow) BatchAddResult {
-	result := BatchAddResult{Rows: make([]BatchAddRow, 0, len(rows))}
-	for _, row := range rows {
-		added, err := s.AddEntryWithName(ctx, baseURL, group, row.DisplayName, row.OnlineID)
-		if err != nil {
-			row.Error = utils.AsAppError(err).Message
-			result.Rows = append(result.Rows, row)
-			continue
+	result := BatchAddResult{Rows: make([]BatchAddRow, len(rows))}
+	workers := 6
+	if len(rows) < workers {
+		workers = len(rows)
+	}
+
+	jobs := make(chan int)
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for idx := range jobs {
+				row := rows[idx]
+				added, err := s.AddEntryWithName(ctx, baseURL, group, row.DisplayName, row.OnlineID)
+				if err != nil {
+					row.Error = utils.AsAppError(err).Message
+					result.Rows[idx] = row
+					continue
+				}
+				row.Added = true
+				row.Entry = &added.Entry
+				row.AdminURL = added.AdminURL
+				row.AdminToken = added.AdminToken
+				result.Rows[idx] = row
+			}
+		}()
+	}
+	for idx := range rows {
+		jobs <- idx
+	}
+	close(jobs)
+	wg.Wait()
+
+	for _, row := range result.Rows {
+		if row.Added {
+			result.Added++
 		}
-		row.Added = true
-		row.Entry = &added.Entry
-		row.AdminURL = added.AdminURL
-		row.AdminToken = added.AdminToken
-		result.Added++
-		result.Rows = append(result.Rows, row)
 	}
 	return result
 }
