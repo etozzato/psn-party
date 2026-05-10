@@ -93,6 +93,7 @@ func (h *Handler) Register(r *gin.Engine) {
 	r.POST("/g/:slug/unlock", h.unlockGroup)
 	r.GET("/g/:slug", h.groupPage)
 	r.POST("/g/:slug/entries", h.addEntry)
+	r.POST("/g/:slug/admin/off", h.adminOff)
 	r.GET("/g/:slug/upload", h.uploadPage)
 	r.POST("/g/:slug/upload", h.uploadEntries)
 	r.GET("/g/:slug/export.csv", h.exportEntries)
@@ -292,6 +293,16 @@ func (h *Handler) uploadEntries(c *gin.Context) {
 		AdminToken: adminToken,
 		Result:     &result,
 	})
+}
+
+func (h *Handler) adminOff(c *gin.Context) {
+	group, err := h.groups.GetGroup(c.Request.Context(), c.Param("slug"))
+	if err != nil {
+		h.renderError(c, err, "/new")
+		return
+	}
+	c.SetCookie(adminCookieName(group), "", -1, "/", "", false, true)
+	c.Redirect(http.StatusSeeOther, cleanAdminOffRedirect(c.PostForm("redirect"), group.Slug))
 }
 
 func (h *Handler) exportEntries(c *gin.Context) {
@@ -586,6 +597,23 @@ func cleanGroupRedirect(raw, slug string) string {
 	}
 	if parsed.RawQuery != "" {
 		return parsed.Path + "?" + parsed.RawQuery
+	}
+	return parsed.Path
+}
+
+func cleanAdminOffRedirect(raw, slug string) string {
+	fallback := "/g/" + slug
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed.IsAbs() || parsed.Path == "" {
+		return fallback
+	}
+	if parsed.Path != fallback && !strings.HasPrefix(parsed.Path, fallback+"/") {
+		return fallback
+	}
+	query := parsed.Query()
+	query.Del("admin")
+	if encoded := query.Encode(); encoded != "" {
+		return parsed.Path + "?" + encoded
 	}
 	return parsed.Path
 }

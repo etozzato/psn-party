@@ -342,6 +342,7 @@ const pageTemplates = `
   <a class="chip {{ if eq .Sort "az" }}active{{ end }}" href="/g/{{ .Group.Slug }}?sort=az{{ if .AdminToken }}&admin={{ .AdminToken }}{{ end }}">A-Z</a>
   <a class="chip {{ if eq .Sort "recent" }}active{{ end }}" href="/g/{{ .Group.Slug }}?sort=recent{{ if .AdminToken }}&admin={{ .AdminToken }}{{ end }}">RECENT</a>
   <span class="chip">{{ len .Entries }} IDS</span>
+  {{ if .CanGroupAdmin }}<form method="post" action="/g/{{ .Group.Slug }}/admin/off" class="action-form"><input type="hidden" name="redirect" value="/g/{{ .Group.Slug }}?sort={{ .Sort }}"><button class="chip admin-off" type="submit">ADMIN OFF</button></form>{{ end }}
   {{ if .CanGroupAdmin }}<a class="chip" href="/g/{{ .Group.Slug }}/export.csv?admin={{ .AdminToken }}">CSV</a><a class="chip" href="/g/{{ .Group.Slug }}/upload?admin={{ .AdminToken }}">UPLOAD</a>{{ end }}
   <a class="chip" href="#new-entry">NEW</a>
 </header>
@@ -426,6 +427,7 @@ const pageTemplates = `
 <header class="bar sticky">
   <a class="brand" href="/g/{{ .Group.Slug }}?admin={{ .AdminToken }}">{{ .Group.Name }}</a>
   <span class="spacer"></span>
+  <form method="post" action="/g/{{ .Group.Slug }}/admin/off" class="action-form"><input type="hidden" name="redirect" value="/g/{{ .Group.Slug }}"><button class="chip admin-off" type="submit">ADMIN OFF</button></form>
   <a class="chip" href="/g/{{ .Group.Slug }}?admin={{ .AdminToken }}">LIST</a>
   <a class="chip" href="/g/{{ .Group.Slug }}/export.csv?admin={{ .AdminToken }}">CSV</a>
   <span class="chip active">UPLOAD</span>
@@ -479,6 +481,7 @@ const pageTemplates = `
   <span class="spacer"></span>
   <a class="chip" href="/g/{{ .Group.Slug }}{{ if .AdminToken }}?admin={{ .AdminToken }}{{ end }}#new-entry">NEW</a>
   {{ if .CanAdmin }}
+    <form method="post" action="/g/{{ .Group.Slug }}/admin/off" class="action-form"><input type="hidden" name="redirect" value="/g/{{ .Group.Slug }}/{{ .Entry.OnlineID }}"><button class="chip admin-off" type="submit">ADMIN OFF</button></form>
     <form method="post" action="/g/{{ .Group.Slug }}/{{ .Entry.OnlineID }}/pull" class="action-form" data-loading data-loading-message="CHECKING PSN"><input type="hidden" name="admin" value="{{ .AdminToken }}"><button class="chip" type="submit">PULL</button></form>
     <form method="post" action="/g/{{ .Group.Slug }}/{{ .Entry.OnlineID }}/remove" class="action-form"><input type="hidden" name="admin" value="{{ .AdminToken }}"><button class="chip danger" type="submit">REMOVE</button></form>
     <form method="post" action="/g/{{ .Group.Slug }}/{{ .Entry.OnlineID }}/ban" class="action-form"><input type="hidden" name="admin" value="{{ .AdminToken }}"><button class="chip danger" type="submit">BAN</button></form>
@@ -680,6 +683,14 @@ button:disabled { cursor: wait; opacity: .64; }
   color: var(--accent);
 }
 .danger { color: var(--danger); }
+.admin-off {
+  min-height: 42px;
+  padding: 10px 16px;
+  border-color: color-mix(in srgb, var(--danger) 82%, var(--line));
+  background: color-mix(in srgb, var(--danger) 18%, var(--panel-2));
+  color: var(--danger);
+  font-weight: 700;
+}
 .panel {
   padding: 22px;
   border: 1px solid var(--line);
