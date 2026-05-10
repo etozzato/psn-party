@@ -227,13 +227,29 @@ const pageTemplates = `
       document.addEventListener("submit", function (event) {
         var form = event.target;
         if (!form || !form.matches("[data-loading]")) return;
-        var overlay = document.querySelector("[data-loading-overlay]");
-        var message = document.querySelector("[data-loading-message]");
-        if (message) message.textContent = form.dataset.loadingMessage || "WORKING";
-        if (overlay) overlay.hidden = false;
-        form.querySelectorAll("button").forEach(function (button) {
-          button.disabled = true;
-        });
+        if (form.dataset.submitting === "true") {
+          event.preventDefault();
+          return;
+        }
+        form.dataset.submitting = "true";
+        var loadingMessage = form.dataset.loadingMessage || "WORKING";
+        window.setTimeout(function () {
+          var overlay = document.querySelector("[data-loading-overlay]");
+          var message = document.querySelector("[data-loading-message]");
+          if (message) message.textContent = loadingMessage;
+          if (overlay) overlay.hidden = false;
+          form.querySelectorAll("button").forEach(function (button) {
+            button.setAttribute("aria-disabled", "true");
+          });
+        }, 0);
+      });
+      document.addEventListener("input", function (event) {
+        var field = event.target;
+        if (!field || !field.closest) return;
+        var panel = field.closest("#new-entry");
+        if (!panel) return;
+        var error = panel.querySelector(".error");
+        if (error) error.hidden = true;
       });
     </script>
   </body>
@@ -269,7 +285,7 @@ const pageTemplates = `
     </div>
     <button type="submit">CREATE</button>
   </form>
-  {{ if .Error }}<p class="error">{{ .Error }}</p>{{ end }}
+  {{ if .Error }}<p class="error">{{ .Error }}{{ if .FormOnlineID }} · Received: {{ .FormOnlineID }}{{ end }}</p>{{ end }}
 </section>
 {{- end }}
 
@@ -315,7 +331,7 @@ const pageTemplates = `
     <input name="pin" inputmode="numeric" pattern="[0-9]{5}" maxlength="5" placeholder="5 digit PIN" autocomplete="off" autofocus required>
     <button type="submit">OPEN</button>
   </form>
-  {{ if .Error }}<p class="error">{{ .Error }}</p>{{ end }}
+  {{ if .Error }}<p class="error">{{ .Error }}{{ if .FormOnlineID }} · Received: {{ .FormOnlineID }}{{ else }} · Received empty PSN ID{{ end }}</p>{{ end }}
 </section>
 {{- end }}
 
@@ -334,7 +350,7 @@ const pageTemplates = `
   <form method="post" action="/g/{{ .Group.Slug }}/entries" class="inline" data-loading data-loading-message="CHECKING PSN">
     {{ if .AdminToken }}<input type="hidden" name="admin" value="{{ .AdminToken }}">{{ end }}
     <input name="display_name" placeholder="Name (optional)" autocomplete="off" maxlength="120" value="{{ .FormName }}">
-    <input name="online_id" placeholder="PSN ID" autocomplete="off" required value="{{ .FormOnlineID }}">
+    <input name="online_id" placeholder="PSN ID" autocomplete="off" minlength="3" maxlength="16" pattern="[A-Za-z][A-Za-z0-9_-]{2,15}" title="3-16 characters, starts with a letter, letters/numbers/underscore/hyphen only" required value="{{ .FormOnlineID }}">
     <button type="submit">ADD</button>
   </form>
   {{ if .Error }}<p class="error">{{ .Error }}</p>{{ end }}
@@ -351,6 +367,7 @@ const pageTemplates = `
   <div class="action-row">
     {{ $subject := printf "PSN Add entry admin link: %s" .Created.Entry.OnlineID }}
     {{ $body := printf "Group: %s\nPSN ID: %s\nEntry URL: %s\nAdmin URL: %s\nSecret key: %s" .Group.Name .Created.Entry.OnlineID .Created.EntryURL .Created.AdminURL .Created.AdminToken }}
+    <a class="button" href="{{ .Created.AdminURL }}">OPEN ADMIN</a>
     <a class="button" href="{{ mailto $subject $body }}">EMAIL YOURSELF</a>
     <a class="button" href="{{ gmail $subject $body }}" target="_blank" rel="noreferrer">GMAIL</a>
     <a class="button" href="{{ outlook $subject $body }}" target="_blank" rel="noreferrer">OUTLOOK</a>

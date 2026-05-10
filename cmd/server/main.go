@@ -58,7 +58,7 @@ func main() {
 
 	psnService := psnsvc.New(logger, time.Duration(cfg.ProfileTimeoutSeconds)*time.Second)
 	groupService := groups.New(pool, psnService)
-	handler := handlers.New(cfg, groupService)
+	handler := handlers.New(cfg, groupService, logger)
 	router := app.NewRouter(cfg, logger, Version, handler)
 
 	addr := fmt.Sprintf("%s:%d", cfg.BindAddress, cfg.Port)

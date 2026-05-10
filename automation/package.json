@@ -1,0 +1,13 @@
+{
+  "name": "psn-add-automation",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "routes": "node routes.js",
+    "inspect:add": "node psn-add-form-debug.js",
+    "smoke:add": "MUTATE=1 node psn-add-form-debug.js"
+  },
+  "dependencies": {
+    "puppeteer-core": "^23.11.1"
+  }
+}

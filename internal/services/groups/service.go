@@ -284,7 +284,10 @@ func (s *Service) AddEntry(ctx context.Context, baseURL string, group Group, onl
 
 func (s *Service) AddEntryWithName(ctx context.Context, baseURL string, group Group, displayName, onlineID string) (AddEntryResult, error) {
 	displayName = strings.TrimSpace(displayName)
-	onlineID = strings.TrimSpace(onlineID)
+	onlineID = utils.CleanOnlineID(onlineID)
+	if onlineID == "" {
+		return AddEntryResult{}, utils.BadRequest("PSN ID is required")
+	}
 	if !utils.ValidOnlineID(onlineID) {
 		return AddEntryResult{}, utils.BadRequest("PSN ID must be 3-16 characters, start with a letter, and use only letters, numbers, underscore, or hyphen")
 	}

@@ -4,6 +4,7 @@ import (
 	"encoding/csv"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -21,6 +22,7 @@ import (
 type Handler struct {
 	cfg    config.Config
 	groups *groups.Service
+	logger *slog.Logger
 }
 
 type newPageData struct {
@@ -78,8 +80,8 @@ type messagePageData struct {
 	Back    string
 }
 
-func New(cfg config.Config, groupService *groups.Service) *Handler {
-	return &Handler{cfg: cfg, groups: groupService}
+func New(cfg config.Config, groupService *groups.Service, logger *slog.Logger) *Handler {
+	return &Handler{cfg: cfg, groups: groupService, logger: logger}
 }
 
 func (h *Handler) Register(r *gin.Engine) {
@@ -173,6 +175,17 @@ func (h *Handler) addEntry(c *gin.Context) {
 
 	displayName := strings.TrimSpace(c.PostForm("display_name"))
 	onlineID := strings.TrimSpace(c.PostForm("online_id"))
+	h.logger.Info("entry add form parsed",
+		"slug", group.Slug,
+		"content_type", c.GetHeader("Content-Type"),
+		"content_length", c.Request.ContentLength,
+		"form_keys", formKeys(c),
+		"display_name_len", len(displayName),
+		"online_id_len", len(onlineID),
+		"online_id", onlineID,
+		"has_admin_query", strings.TrimSpace(c.Query("admin")) != "",
+		"has_admin_form", strings.TrimSpace(c.PostForm("admin")) != "",
+	)
 	result, err := h.groups.AddEntryWithName(c.Request.Context(), h.cfg.PublicBaseURL, group, displayName, onlineID)
 	if err != nil {
 		entries, listErr := h.groups.ListEntries(c.Request.Context(), group.ID, sortFromRequest(c))
@@ -252,6 +265,17 @@ func (h *Handler) uploadEntries(c *gin.Context) {
 	}
 
 	rows, err := parseUploadRows(c)
+	h.logger.Info("csv upload form parsed",
+		"slug", group.Slug,
+		"content_type", c.GetHeader("Content-Type"),
+		"content_length", c.Request.ContentLength,
+		"form_keys", formKeys(c),
+		"csv_text_len", len(uploadCSVText(c)),
+		"has_admin_query", strings.TrimSpace(c.Query("admin")) != "",
+		"has_admin_form", strings.TrimSpace(c.PostForm("admin")) != "",
+		"row_count", len(rows),
+		"parse_error", err != nil,
+	)
 	if err != nil {
 		web.Render(c, utils.AsAppError(err).Status, group.Name+" / Upload", "upload", uploadPageData{
 			Group:      group,
@@ -609,6 +633,9 @@ func parseUploadRows(c *gin.Context) ([]groups.BatchAddRow, error) {
 func uploadReader(c *gin.Context) (io.ReadCloser, error) {
 	text := uploadCSVText(c)
 	if text == "" {
+		c.Set("csv_text_empty", true)
+	}
+	if text == "" {
 		return nil, utils.BadRequest("CSV file or pasted CSV is required")
 	}
 	return io.NopCloser(strings.NewReader(text)), nil
@@ -616,6 +643,17 @@ func uploadReader(c *gin.Context) (io.ReadCloser, error) {
 
 func uploadCSVText(c *gin.Context) string {
 	return strings.TrimSpace(c.PostForm("csv_text"))
+}
+
+func formKeys(c *gin.Context) []string {
+	if c.Request.Form == nil && c.Request.PostForm == nil {
+		_ = c.Request.ParseForm()
+	}
+	keys := make([]string, 0, len(c.Request.PostForm))
+	for key := range c.Request.PostForm {
+		keys = append(keys, key)
+	}
+	return keys
 }
 
 func blankRecord(record []string) bool {
